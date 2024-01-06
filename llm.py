@@ -4,8 +4,9 @@ class LLM:
         self.name = name
         self.prompt_template = prompt_template
         
-    def create_full_prompt(self, actual_prompt):
-        parts = self.prompt_template.split('\n')
+    def create_full_prompt(self, actual_prompt, mistral_instruct=False):
+        delimeter = ' ' if mistral_instruct else '\n' 
+        parts = self.prompt_template.split(delimeter)
         parts[1] = actual_prompt
-        full_prompt = '\n'.join(parts)
+        full_prompt = delimeter.join(parts)
         return full_prompt

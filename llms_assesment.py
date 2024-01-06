@@ -3,7 +3,6 @@ import requests
 import csv 
 import redis
 import time
-import pandas as pd
 from llm import LLM
 from gpt4all import GPT4All
 from dotenv import load_dotenv
@@ -14,22 +13,25 @@ MODELS_PATH = os.getenv("MODELS_PATH")
 
 KEY_TTL = 14400 # Redis key time-to-live is 4 hours
 redis_client = redis.StrictRedis(host='localhost', port=6379, decode_responses=True)
-# redis_client.setex('ooo',30, 2222)
-# msg = redis_client.get('ooo')
-# print(msg)
 
 # Models
-mistral = LLM("mistral-7b-openorca.Q4_0.gguf","### Human:\n\n### Assistant:\n")
-orca2 = LLM("orca-2-7b.Q4_0.gguf","### Human:\n\n### Assistant:\n")
-falcon = LLM("gpt4all-falcon-q4_0.gguf","### Instruction:\n\n### Response:\n")
-competing_models = [mistral, orca2]
-judging_model = falcon
+mistral_oo = LLM("mistral-7b-openorca.Q4_0.gguf", "### Human:\n\n### Assistant:\n")
+orca2 = LLM("orca-2-7b.Q4_0.gguf", "### Human:\n\n### Assistant:\n")
+orca_mini = LLM("orca-mini-3b-gguf2-q4_0.gguf", "### User:\n\n### Response:\n")
+falcon = LLM("gpt4all-falcon-q4_0.gguf", "### Instruction:\n\n### Response:\n")
+competing_models = [falcon, orca2]
+judging_model = mistral_oo
 
-judging_model_prompt = judging_model_prompt = "Given the following question '{}', don't answer it. Instead, give a ranking on a " \
-                       "scale of 0 - 1.0 of how similar the following two answers are to one another:\n1. {}\n2. {}\nRESPOND JUST WITH YOUR RATING NUMBER!"
-      
-
-
+def get_assesment_prompt(question, worlfram_answer, model_answer):
+    judging_model_prompt = f"""Consider the question: {question}. Please avoid solving it. Instead, assess the similarity between two given 
+answers on a scale from 0 to 1.0. 
+The provided answers are:
+    1. {worlfram_answer}
+    2. {model_answer}
+Output a similarity score indicating the degree of likeness between the two responses. RETURN ONLY THE SCORE AND NOTHING ELSE."""
+     
+    return judging_model_prompt
+    
 def read_questions_from_csv(file_path):
     with open(file_path, 'r') as csv_file:
         csv_reader = csv.DictReader(csv_file)
@@ -54,10 +56,22 @@ def wolfram_alpha_short_answer_query(query, app_id):
     else:
         print(f"Error {response.status_code}: {response.text}")
         return None
-    
+ 
+def get_statistics(models, results):   
+    statistics_dict = {model.name :
+        {'Rating sum': 0, 'Lowest rating' : 1000, 'Lowest rated question' : "", 'Lowest rated answer' : "" } 
+                       for model in models}
+    for result in results:
+      model_name = result['Model']
+      current_rating = result['Correctness']     
+      statistics_dict[model_name]['Rating sum'] += current_rating
+      if current_rating < statistics_dict[model_name]['Lowest rating']:
+          statistics_dict[model_name]['Lowest rating'] = current_rating
+          statistics_dict[model_name]['Lowest rated question'] = result['Question']
+          statistics_dict[model_name]['Lowest rated answer'] = result['Answer']
+    return statistics_dict
 def extract_first_float(s):
     words = s.split()
-
     for word in words:
         try:
             float_value = float(word)
@@ -67,49 +81,68 @@ def extract_first_float(s):
     return None    
 
 def main():         
-    questions = read_questions_from_csv('General_Knowledge_Questions.csv')[-7:]
+    questions = read_questions_from_csv('General_Knowledge_Questions.csv')[20:35]
     wolfram_answered_questions = []
+    num_answered = 0
     results = [] 
     
     for question in questions:
+        print(f'{question}')
         wolfram_answer = wolfram_alpha_short_answer_query(question, WOLFRAM_APP_ID)
-        print(wolfram_answer) 
         if wolfram_answer is not None:
+            print(f'Wolfram answered: {wolfram_answer}\n')
             wolfram_answered_questions.append(question)
-    for question in wolfram_answered_questions:
-        wolfram_answer = wolfram_alpha_short_answer_query(question, WOLFRAM_APP_ID)
-        print(wolfram_answer) 
-        if wolfram_answer is not None:        
-            model_engine = None
-            current_question_results = []
-            for model in competing_models:
-                model_engine = GPT4All(model.name, MODELS_PATH) 
-                full_prompt = model.create_full_prompt(question + " ANSWER WITH AT MOST 5 WORDS")
-                print(question)
-                start = time.time()
-                answer = model_engine.generate(full_prompt, max_tokens=50, temp=0.0)
-                end = time.time()
-                current_question_results.append({
-                    'Question' : question,
-                    'Model' : model.name,
-                    'Answer' : answer,
-                    'TimeInMillisecondsToGetAnswer' : int((end - start) * 1000),
-                    'Correctness' : None
-                })
-                # Here I want to append to 'results' the all the columns but 'Correctness'
-                print(f"{model.name} answered:\n{answer}")       
-            model_engine = GPT4All(judging_model.name, MODELS_PATH)
-            for result in current_question_results:
-                prompt = judging_model_prompt.format(question, wolfram_answer, result['Answer'])
-                full_prompt = model.create_full_prompt(prompt)
-                response = model_engine.generate(full_prompt, max_tokens=20)
-                print(response) # Check
-                rating = extract_first_float(response)
-                if rating is None:
-                    raise ValueError
-                result['Correctness'] = rating
-            results.extend(current_question_results)
-            
-    print(results)
+        else:
+            print('Wolfram could not provide an answer to this question.\n')
+    num_answered = len(wolfram_answered_questions)           
+    model_engine = None                    
+    for model in competing_models:
+        print('Loading LLM...')
+        model_engine = GPT4All(model.name, MODELS_PATH)
+        print(f'===================== {model.name} =====================\n') 
+        for question in wolfram_answered_questions:
+            full_prompt = model.create_full_prompt(question + " ANSWER WITH AT MOST 5 WORDS")
+            print(question)
+            start = time.time()
+            answer = model_engine.generate(full_prompt, max_tokens=50, temp=0.0)
+            end = time.time()
+            results.append({
+                'Question' : question,
+                'Model' : model.name,
+                'Answer' : answer,
+                'TimeInMillisecondsToGetAnswer' : int((end - start) * 1000),
+                'Correctness' : None
+            })
+            print(f"{model.name} answered:\n{answer}\n") 
+    print('===================== Rating Stage =====================\n')
+    print(f'Judging model: {judging_model.name}\n') 
+    model_engine = GPT4All(judging_model.name, MODELS_PATH)
+    for result in results:
+        wolfram_answer = wolfram_alpha_short_answer_query(result['Question'], WOLFRAM_APP_ID)
+        prompt = get_assesment_prompt(question, wolfram_answer, result['Answer'])
+        full_prompt = model.create_full_prompt(prompt)
+        print('Rating answer...')
+        response = model_engine.generate(full_prompt, max_tokens=30, temp=0.0)
+        print(response)
+        rating = extract_first_float(response)
+        if rating is None:
+            rating = 0.5 # Give 0.5 for answers who couldn't be rated by the judge LLM
+            print(f'{judging_model.name} failed to give a rating (0.5 default rating was given).')
+        else:  
+            print(f'Answer rated: {judging_model.name} gave a rating of {rating}\n')
+        result['Correctness'] = rating 
+    print('\nAssesment over. getting statistics ...\n')       
+    stats_dict = get_statistics(competing_models, results)
+    print(f"""===========Statistics===========\n 
+1. Number of questions Wolfram answered: {num_answered}\n
+2. Average answer rating of {competing_models[0].name}: {stats_dict[competing_models[0].name]['Rating sum'] / num_answered}\n
+3. Average answer rating of {competing_models[1].name}: {stats_dict[competing_models[1].name]['Rating sum'] / num_answered}\n
+4. Lowest rating question and answer of {competing_models[0].name}:
+    Q - {stats_dict[competing_models[0].name]['Lowest rated question']}
+    A - {stats_dict[competing_models[0].name]['Lowest rated answer']}\n
+5. Lowest rating question and answer of {competing_models[1].name}:
+    Q - {stats_dict[competing_models[1].name]['Lowest rated question']}
+    A - {stats_dict[competing_models[1].name]['Lowest rated answer']}\
+""")
 if __name__ == '__main__':
-    main()         
+   main()
