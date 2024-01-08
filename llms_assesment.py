@@ -17,7 +17,6 @@ redis_client = redis.StrictRedis(host='localhost', port=6379, decode_responses=T
 # Models
 mistral_oo = LLM("mistral-7b-openorca.Q4_0.gguf", "### Human:\n\n### Assistant:\n")
 orca2 = LLM("orca-2-7b.Q4_0.gguf", "### Human:\n\n### Assistant:\n")
-orca_mini = LLM("orca-mini-3b-gguf2-q4_0.gguf", "### User:\n\n### Response:\n")
 falcon = LLM("gpt4all-falcon-q4_0.gguf", "### Instruction:\n\n### Response:\n")
 competing_models = [falcon, orca2]
 judging_model = mistral_oo
@@ -70,6 +69,9 @@ def get_statistics(models, results):
           statistics_dict[model_name]['Lowest rated question'] = result['Question']
           statistics_dict[model_name]['Lowest rated answer'] = result['Answer']
     return statistics_dict
+
+# This function is for protection only,
+# as the response of the judging model is almost always only a float and nothing else.
 def extract_first_float(s):
     words = s.split()
     for word in words:
@@ -81,7 +83,7 @@ def extract_first_float(s):
     return None    
 
 def main():         
-    questions = read_questions_from_csv('General_Knowledge_Questions.csv')[20:35]
+    questions = read_questions_from_csv('General_Knowledge_Questions.csv')
     wolfram_answered_questions = []
     num_answered = 0
     results = [] 
@@ -93,8 +95,9 @@ def main():
             print(f'Wolfram answered: {wolfram_answer}\n')
             wolfram_answered_questions.append(question)
         else:
-            print('Wolfram could not provide an answer to this question.\n')
-    num_answered = len(wolfram_answered_questions)           
+            print('Skipping to next question.\n')
+    num_answered = len(wolfram_answered_questions)
+    print(num_answered)         
     model_engine = None                    
     for model in competing_models:
         print('Loading LLM...')
@@ -122,7 +125,7 @@ def main():
         prompt = get_assesment_prompt(question, wolfram_answer, result['Answer'])
         full_prompt = model.create_full_prompt(prompt)
         print('Rating answer...')
-        response = model_engine.generate(full_prompt, max_tokens=30, temp=0.0)
+        response = model_engine.generate(full_prompt, max_tokens=30, temp=0.0) 
         print(response)
         rating = extract_first_float(response)
         if rating is None:
@@ -145,4 +148,5 @@ def main():
     A - {stats_dict[competing_models[1].name]['Lowest rated answer']}\
 """)
 if __name__ == '__main__':
-   main()
+  main()
+  
